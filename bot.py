@@ -1,172 +1,185 @@
-import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    ApplicationBuilder, CommandHandler, CallbackQueryHandler,
-    ContextTypes, MessageHandler, filters
-)
+import json
 import random
 from datetime import datetime, timedelta
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
 
-# إعدادات اللوج
-logging.basicConfig(level=logging.INFO)
+POINTS_FILE = "points.json"
 
-# قاعدة بيانات مؤقتة في الذاكرة
-users_data = {}
+# خدمات السوشيال وأسعارها بالنقاط
+SOCIAL_SERVICES = {
+    "متابعين": 1000,
+    "لايكات": 500,
+    "مشاهدات": 300,
+    "تعليقات": 800,
+}
 
-# اسم المطور والبوت
-BOT_NAME = "جمايكا#1"
-DEVELOPER_NAME = "روني البحيره"
-DEVELOPER_PHONE = "01212843252"
+WELCOME_IMAGE = "welcome.jpg"  # صورة ترحيب
 
-# دالة لتهيئة بيانات المستخدم
-def get_user_data(user_id):
-    if user_id not in users_data:
-        users_data[user_id] = {
-            "points": 0,
-            "last_daily": None,
-            "last_weekly": None
-        }
-    return users_data[user_id]
+# تحميل نقاط المستخدمين من الملف
+def load_points():
+    try:
+        with open(POINTS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
 
-# رسالة الترحيب
+# حفظ النقاط في الملف
+def save_points(data):
+    with open(POINTS_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=4)
+
+# إضافة نقاط لمستخدم
+def add_points(user_id, amount):
+    points = load_points()
+    user_id = str(user_id)
+    if user_id not in points:
+        points[user_id] = {"points": 0, "last_daily": None, "last_weekly": None}
+    points[user_id]["points"] += amount
+    save_points(points)
+
+# الحصول على نقاط المستخدم
+def get_user_points(user_id):
+    points = load_points()
+    user_id = str(user_id)
+    if user_id in points:
+        return points[user_id]["points"]
+    return 0
+
+# تحديث توقيت الهدايا اليومية والأسبوعية
+def update_user_time(user_id, key):
+    points = load_points()
+    user_id = str(user_id)
+    if user_id not in points:
+        points[user_id] = {"points": 0, "last_daily": None, "last_weekly": None}
+    points[user_id][key] = datetime.utcnow().isoformat()
+    save_points(points)
+
+# التحقق من صلاحية الهدايا اليومية والأسبوعية
+def can_claim(user_id, key, interval_hours):
+    points = load_points()
+    user_id = str(user_id)
+    if user_id not in points or points[user_id][key] is None:
+        return True
+    last_time = datetime.fromisoformat(points[user_id][key])
+    return datetime.utcnow() - last_time > timedelta(hours=interval_hours)
+
+# أمر /start - ترحيب
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [InlineKeyboardButton("🎁 هديتي اليومية", callback_data="daily")],
-        [InlineKeyboardButton("🎡 عجلة الحظ", callback_data="wheel")],
-        [InlineKeyboardButton("📅 تسجيل أسبوعي", callback_data="weekly")],
-        [InlineKeyboardButton("🛒 الخدمات بالنقاط", callback_data="services")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    user = update.effective_user
+    welcome_text = (
+        f"أهلاً بك {user.first_name} في بوت جمايكا#1 🌟\n"
+        f"مرحباً بك في بوت خدمات السوشيال ميديا مع نظام النقاط.\n\n"
+        f"لديك الآن {get_user_points(user.id)} نقطة.\n"
+        "استخدم /help لمعرفة الأوامر."
+    )
+    await update.message.reply_photo(
+        photo=open(WELCOME_IMAGE, "rb"),
+        caption=welcome_text,
+    )
+
+# أمر /help - قائمة الأوامر
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    help_text = (
+        "قائمة الأوامر:\n"
+        "/start - بداية التشغيل\n"
+        "/help - قائمة الأوامر\n"
+        "/points - عرض نقاطك الحالية\n"
+        "/daily - استلام هدية يومية (200 نقطة)\n"
+        "/weekly - استلام هدية أسبوعية (1000 نقطة)\n"
+        "/spin - عجلة الحظ (من 50 إلى 500 نقطة)\n"
+        "/services - عرض خدمات التزويد\n"
+        "/buy <الخدمة> - شراء خدمة (مثال: /buy متابعين)\n"
+    )
+    await update.message.reply_text(help_text)
+
+# أمر /points - عرض نقاط المستخدم
+async def points_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    pts = get_user_points(user.id)
+    await update.message.reply_text(f"لديك {pts} نقطة 🎉")
+
+# أمر /daily - هدية يومية
+async def daily_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if can_claim(user.id, "last_daily", 24):
+        add_points(user.id, 200)
+        update_user_time(user.id, "last_daily")
+        await update.message.reply_text("🎁 استلمت هديتك اليومية 200 نقطة! استمتع.")
+    else:
+        await update.message.reply_text("⏰ لقد استلمت هديتك اليوم بالفعل. جرب غداً!")
+
+# أمر /weekly - هدية أسبوعية
+async def weekly_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if can_claim(user.id, "last_weekly", 168):  # 168 ساعة = 7 أيام
+        add_points(user.id, 1000)
+        update_user_time(user.id, "last_weekly")
+        await update.message.reply_text("🎁 استلمت هديتك الأسبوعية 1000 نقطة! أحسنت.")
+    else:
+        await update.message.reply_text("⏰ لقد استلمت هديتك الأسبوعية بالفعل. انتظر الأسبوع القادم!")
+
+# أمر /spin - عجلة الحظ
+async def spin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    points_won = random.randint(50, 500)
+    add_points(user.id, points_won)
+    await update.message.reply_text(f"🎡 عجلة الحظ أوقفت عند: {points_won} نقطة! مبروك!")
+
+# أمر /services - عرض خدمات التزويد
+async def services_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = "💼 خدمات التزويد المتاحة:\n"
+    for service, price in SOCIAL_SERVICES.items():
+        text += f"• {service} - {price} نقطة\n"
+    text += "\nلشراء خدمة، اكتب: /buy اسم_الخدمة"
+    await update.message.reply_text(text)
+
+# أمر /buy - شراء خدمة
+async def buy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    args = context.args
+    if not args:
+        await update.message.reply_text("❗️ من فضلك اكتب اسم الخدمة بعد الأمر.\nمثال: /buy متابعين")
+        return
+
+    service_name = args[0]
+    if service_name not in SOCIAL_SERVICES:
+        await update.message.reply_text("❌ الخدمة غير موجودة. استخدم /services لمعرفة الخدمات المتاحة.")
+        return
+
+    price = SOCIAL_SERVICES[service_name]
+    user_points = get_user_points(user.id)
+    if user_points < price:
+        await update.message.reply_text(f"❌ نقاطك غير كافية. تحتاج {price} نقطة، ولديك {user_points} نقطة فقط.")
+        return
+
+    # خصم النقاط وإتمام العملية (هنا يمكنك إضافة تنفيذ الخدمة الحقيقية)
+    points = load_points()
+    points[str(user.id)]["points"] -= price
+    save_points(points)
+
     await update.message.reply_text(
-        f"أهلاً بيك في بوت {BOT_NAME} 🤖\n"
-        f"المطور: {DEVELOPER_NAME} 📱\n"
-        f"رقم المطور: {DEVELOPER_PHONE}\n\n"
-        "اختر من الأزرار التالية:",
-        reply_markup=reply_markup
+        f"✅ تم شراء خدمة {service_name} مقابل {price} نقطة.\n"
+        "سيتم تنفيذ طلبك قريباً. شكراً لاستخدامك بوت جمايكا#1! ❤️"
     )
 
-# هدية يومية
-async def daily_reward(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user_id = query.from_user.id
-    user = get_user_data(user_id)
-
-    now = datetime.now()
-    if user["last_daily"] and now - user["last_daily"] < timedelta(days=1):
-        await query.answer("😅 خدت هديتك اليومية النهاردة، تعالى بكرة!")
-        return
-
-    user["last_daily"] = now
-    user["points"] += 200
-    await query.answer("🎁 تم إضافة 200 نقطة لحسابك!")
-    await query.edit_message_text("✅ استلمت هديتك اليومية! 🎉")
-
-# تسجيل أسبوعي
-async def weekly_reward(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user_id = query.from_user.id
-    user = get_user_data(user_id)
-
-    now = datetime.now()
-    if user["last_weekly"] and now - user["last_weekly"] < timedelta(days=7):
-        await query.answer("😅 انت مسجل الاسبوع ده بالفعل.")
-        return
-
-    user["last_weekly"] = now
-    user["points"] += 1000
-    await query.answer("🎊 تم إضافة 1000 نقطة لحسابك!")
-    await query.edit_message_text("✅ تم تسجيلك الأسبوعي بنجاح! 🔥")
-
-# عجلة الحظ
-async def spin_wheel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user_id = query.from_user.id
-    user = get_user_data(user_id)
-
-    reward = random.choice([50, 100, 150, 200, 300, 500])
-    user["points"] += reward
-    await query.answer(f"🎡 فزت بـ {reward} نقطة!")
-    await query.edit_message_text(f"✅ عجلة الحظ دارت! وكسبت {reward} نقطة 🤑")
-
-# عرض الخدمات
-async def show_services(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    keyboard = [
-        [InlineKeyboardButton("💎 خدمة VIP - 1000 نقطة", callback_data="buy_vip")],
-        [InlineKeyboardButton("📸 تصميم لوجو - 500 نقطة", callback_data="buy_logo")],
-        [InlineKeyboardButton("🔙 رجوع", callback_data="home")]
-    ]
-    markup = InlineKeyboardMarkup(keyboard)
-    await query.edit_message_text(
-        "🛒 *قائمة الخدمات بالنقاط:*\n"
-        "اختر الخدمة اللي محتاجها، وسيتم التحقق منك ✨",
-        parse_mode="Markdown",
-        reply_markup=markup
-    )
-
-# الرجوع للصفحة الرئيسية
-async def back_home(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    keyboard = [
-        [InlineKeyboardButton("🎁 هديتي اليومية", callback_data="daily")],
-        [InlineKeyboardButton("🎡 عجلة الحظ", callback_data="wheel")],
-        [InlineKeyboardButton("📅 تسجيل أسبوعي", callback_data="weekly")],
-        [InlineKeyboardButton("🛒 الخدمات بالنقاط", callback_data="services")]
-    ]
-    await query.edit_message_text(
-        f"✅ رجعت للصفحة الرئيسية لـ {BOT_NAME} 🤖",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-# طلب خدمة VIP
-async def buy_vip(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user_id = query.from_user.id
-    user = get_user_data(user_id)
-
-    if user["points"] < 1000:
-        await query.answer("❌ نقاطك مش كفاية!")
-        return
-
-    user["points"] -= 1000
-    await query.edit_message_text("✅ تم طلب خدمة VIP بنجاح، جاري التحقق من الطلب ✅")
-
-# طلب لوجو
-async def buy_logo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user_id = query.from_user.id
-    user = get_user_data(user_id)
-
-    if user["points"] < 500:
-        await query.answer("❌ نقاطك غير كافية!")
-        return
-
-    user["points"] -= 500
-    await query.edit_message_text("✅ تم طلب تصميم اللوجو بنجاح، سيتم التواصل معك 🎨")
-
-# توزيع الردود بناءً على الكول باك
-async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    data = update.callback_query.data
-    handlers = {
-        "daily": daily_reward,
-        "weekly": weekly_reward,
-        "wheel": spin_wheel,
-        "services": show_services,
-        "home": back_home,
-        "buy_vip": buy_vip,
-        "buy_logo": buy_logo,
-    }
-    if data in handlers:
-        await handlers[data](update, context)
-
-# تشغيل البوت
-if __name__ == "__main__":
-    import os
-    TOKEN = "8189292683:AAE53IGPbRVoe5Sc3a5saQGXHzOE-NWxPWY"  # ← غيّر دي بالتوكن بتاعك
+async def main():
+    TOKEN = "8189292683:AAE53IGPbRVoe5Sc3a5saQGXHzOE-NWxPWY"  # استبدل بالتوكن الحقيقي
 
     app = ApplicationBuilder().token(TOKEN).build()
+
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(callback_handler))
-    
-    print(f"🤖 بوت {BOT_NAME} شغال دلوقتي...")
-    app.run_polling()
+    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("points", points_command))
+    app.add_handler(CommandHandler("daily", daily_command))
+    app.add_handler(CommandHandler("weekly", weekly_command))
+    app.add_handler(CommandHandler("spin", spin_command))
+    app.add_handler(CommandHandler("services", services_command))
+    app.add_handler(CommandHandler("buy", buy_command))
+
+    print("🤖 بوت جمايكا#1 شغال دلوقتي...")
+    await app.run_polling()
+
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(main())
